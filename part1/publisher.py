@@ -66,7 +66,8 @@ stats = Statistics()
 # Print only if DEBUG_PRINT option is true
 def debug_print(val):
     if DEBUG_PRINT:
-        print(val)
+        pass
+        #print(val)
 
 # Make API request to get JSON response for one vehicle
 def get_breadcrumbs(vehicle_id) -> dict | None:

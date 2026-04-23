@@ -85,7 +85,8 @@ backup_filename = None      # name of today's log file
 # Print only if DEBUG_PRINT option is true
 def debug_print(val):
     if DEBUG_PRINT:
-        print(val)
+        #print(val)
+        pass
 
 
 # Handle sentinel message
