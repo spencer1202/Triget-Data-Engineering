@@ -33,6 +33,7 @@ class Statistics:
         self.earliest_time                = None  # Earliest breadcrumb timestamp (derived from OPD_DATE and ACT_TIME)
         self.latest_time                  = None  # Latest breadcrumb timestamp (derived from OPD_DATE and ACT_TIME)
         self.total_breadcrumbs            = 0     # Total number of breadcrumbs received
+        self.invalid_breadcrumbs          = 0     # Total number of invalid breadcrumbs dropped
         self.sentinel_received_timestamp  = None  # Timestamp of moment when sentinel is received
         self.total_time                   = None  # Elapsed wall-clock time from moment when first breadcrumb of the 
                                                   # day is received until moment when the sentinel message is received.
@@ -84,11 +85,10 @@ class Statistics:
         print(f"Unique vehicle IDs:             {len(self.vehicle_ids)}")
         print(f"Unique trips:                   {len(self.trip_ids)}")
         print(f"Breadcrumbs received:           {self.total_breadcrumbs}")
+        print(f"Invalid breadcrumbs dropped:    {self.invalid_breadcrumbs}")
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
         print(f"------------------------\n")
-
-
 
 
 # -- Globals ---------------------------------------------------
@@ -98,6 +98,13 @@ stats_lock      = Lock()
 
 
 # -- Helper Functions ------------------------------------------
+# Print only if DEBUG_PRINT option is true
+def debug_print(val):
+    if DEBUG_PRINT:
+        #print(val)
+        pass
+
+
 def validate_breadcrumb(payload):
     errors = []
 
@@ -154,11 +161,54 @@ def validate_breadcrumb(payload):
 
     return len(errors) == 0, errors
 
-# Print only if DEBUG_PRINT option is true
-def debug_print(val):
-    if DEBUG_PRINT:
-        #print(val)
-        pass
+
+# -- Transform -------------------------------------------------
+previous_trip_points = {}
+invalid_records = []
+
+
+def transform_breadcrumb(payload):
+    transformed = payload.copy()
+
+    # Create timestamp from OPD_DATE + ACT_TIME
+    opd_date = transformed.get('OPD_DATE', '')
+    act_time = int(transformed.get('ACT_TIME', 0))
+    base = dt.datetime.strptime(opd_date[:9], '%d%b%Y')
+    timestamp = base + dt.timedelta(seconds=act_time)
+
+    transformed['timestamp'] = timestamp.isoformat()
+
+    # Compute speed per trip
+    trip_id = transformed.get('EVENT_NO_TRIP')
+    meters = float(transformed.get('METERS', 0))
+
+    if trip_id in previous_trip_points:
+        previous_timestamp, previous_meters = previous_trip_points[trip_id]
+
+        time_diff = (timestamp - previous_timestamp).total_seconds()
+        meters_diff = meters - previous_meters
+
+        if time_diff > 0 and meters_diff >= 0:
+            speed = meters_diff / time_diff
+        else:
+            speed = 0.0
+    else:
+        speed = 0.0
+
+    transformed['speed'] = speed
+    previous_trip_points[trip_id] = (timestamp, meters)
+
+    # Remove unneeded fields
+    for field in ['EVENT_NO_STOP', 'GPS_SATELLITES', 'GPS_HDOP', 'OPD_DATE', 'ACT_TIME']:
+        transformed.pop(field, None)
+
+    # Rename fields
+    transformed['trip_id'] = transformed.pop('EVENT_NO_TRIP')
+    transformed['vehicle_id'] = transformed.pop('VEHICLE_ID')
+    transformed['longitude'] = transformed.pop('GPS_LONGITUDE')
+    transformed['latitude'] = transformed.pop('GPS_LATITUDE')
+
+    return transformed
 
 
 # Handle sentinel message
@@ -166,9 +216,9 @@ def handle_sentinel(payload):
     debug_print("Sentinel received!")
 
     # Wait until remaining messages are processed
-    expected_count = payload.get('count')
+    expected_count = payload.get('count', 0)
     timeout = 10
-    while stats.total_breadcrumbs < expected_count and timeout > 0:
+    while (stats.total_breadcrumbs + stats.invalid_breadcrumbs) < expected_count and timeout > 0:
         timeout -= 1
         time.sleep(1)
 
@@ -176,6 +226,9 @@ def handle_sentinel(payload):
     with stats_lock:
         stats.end_stats()
         stats.report()
+
+    with open(f"invalid_data_{dt.date.today().isoformat()}.json", "w") as f:
+        json.dump(invalid_records, f, indent=2, default=str)
 
     sentinel_event.set()
 
@@ -200,13 +253,22 @@ def callback(message):
 
     if not is_valid:
         print(f"Invalid breadcrumb dropped: {errors}")
+        invalid_records.append({
+            "record": payload,
+            "violations": errors
+        })
         with stats_lock:
             stats.invalid_breadcrumbs += 1
         message.ack()
         return
 
+    transformed_payload = transform_breadcrumb(payload)
+
     with stats_lock:
         stats.record_breadcrumb(payload)
+
+    # Later, Step 7 database insert will use transformed_payload
+    # insert_breadcrumb(transformed_payload)
 
     message.ack()
 
@@ -240,6 +302,7 @@ def main():
 
         with stats_lock:
             stats.reset()
+            previous_trip_points.clear()
         debug_print("Finished processing. Stats reset.\n")
 
 
