@@ -98,6 +98,62 @@ stats_lock      = Lock()
 
 
 # -- Helper Functions ------------------------------------------
+def validate_breadcrumb(payload):
+    errors = []
+
+    required_fields = [
+        'EVENT_NO_TRIP',
+        'VEHICLE_ID',
+        'OPD_DATE',
+        'ACT_TIME',
+        'METERS',
+        'GPS_LATITUDE',
+        'GPS_LONGITUDE'
+    ]
+
+    for field in required_fields:
+        if field not in payload or payload[field] in [None, '']:
+            errors.append(f"Missing required field: {field}")
+
+    try:
+        lat = float(payload.get('GPS_LATITUDE'))
+        if lat < -90 or lat > 90:
+            errors.append("GPS_LATITUDE out of range")
+    except:
+        errors.append("GPS_LATITUDE is not numeric")
+
+    try:
+        lon = float(payload.get('GPS_LONGITUDE'))
+        if lon < -180 or lon > 180:
+            errors.append("GPS_LONGITUDE out of range")
+    except:
+        errors.append("GPS_LONGITUDE is not numeric")
+
+    try:
+        act_time = int(payload.get('ACT_TIME'))
+        if act_time < 0 or act_time > 90000:
+            errors.append("ACT_TIME out of range")
+    except:
+        errors.append("ACT_TIME is not numeric")
+
+    try:
+        meters = float(payload.get('METERS'))
+        if meters < 0:
+            errors.append("METERS cannot be negative")
+    except:
+        errors.append("METERS is not numeric")
+
+    try:
+        lat = float(payload.get('GPS_LATITUDE'))
+        lon = float(payload.get('GPS_LONGITUDE'))
+
+        if not (45.0 <= lat <= 46.0 and -123.5 <= lon <= -122.0):
+            errors.append("GPS coordinates outside Portland metro area")
+    except:
+        pass
+
+    return len(errors) == 0, errors
+
 # Print only if DEBUG_PRINT option is true
 def debug_print(val):
     if DEBUG_PRINT:
@@ -137,6 +193,15 @@ def callback(message):
     # Sentinel message received
     if payload.get('sentinel'):
         handle_sentinel(payload)
+        message.ack()
+        return
+
+    is_valid, errors = validate_breadcrumb(payload)
+
+    if not is_valid:
+        print(f"Invalid breadcrumb dropped: {errors}")
+        with stats_lock:
+            stats.invalid_breadcrumbs += 1
         message.ack()
         return
 
