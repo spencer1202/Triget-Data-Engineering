@@ -14,13 +14,13 @@ PROJECT_ID      = 'triget-data-engineering'
 SUBSCRIPTION_ID = 'test_sub'
 
 # Debug settings
-DEBUG_PRINT = True
+DEBUG_PRINT = False
 
 # Number of worker threads processing message queue
 NUM_THREADS = 4
 
 # Maximum messages in internal message queue
-MESSAGE_QUEUE_MAX = 10000
+MESSAGE_QUEUE_MAX = 0
 
 # FLow control settings
 flow_control = FlowControl(
