@@ -1,4 +1,5 @@
 import sys
+import queue
 import pandas as pd
 import time
 import datetime as dt
@@ -6,6 +7,7 @@ import json
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
 from threading import Event, Lock
+from concurrent.futures import ThreadPoolExecutor
 
 
 # -- Configuration ---------------------------------------------
@@ -14,6 +16,12 @@ SUBSCRIPTION_ID = 'test_sub'
 
 # Debug settings
 DEBUG_PRINT = False
+
+# Number of worker threads processing message queue
+NUM_THREADS = 4
+
+# Maximum messages in internal message queue
+MESSAGE_QUEUE_MAX = 5000
 
 # FLow control settings
 flow_control = FlowControl(
@@ -96,8 +104,13 @@ class Statistics:
 stats           = Statistics()
 sentinel_event  = Event()
 stats_lock      = Lock()
-bc_list         = list()
 
+# Output lists
+valid_records           = []
+invalid_records         = []
+
+# Internal work queue: callback enqueues raw payloads; workers dequeue and process
+message_queue = queue.Queue(maxsize=MESSAGE_QUEUE_MAX)
 
 # -- Helper Functions ------------------------------------------
 # Print only if DEBUG_PRINT option is true
@@ -113,8 +126,15 @@ def handle_sentinel(payload):
 
     # Wait until remaining messages are processed
     expected_count = payload.get('count')
-    timeout = 10
-    while stats.total_breadcrumbs < expected_count and timeout > 0:
+    timeout = 30
+    while timeout > 0:
+        # Queue has been fully processed
+        if message_queue.empty():
+            with stats_lock:
+                current = stats.total_breadcrumbs
+            # Expected number of messages have been processed, proceed
+            if current >= expected_count:
+                break
         timeout -= 1
         time.sleep(1)
 
@@ -207,6 +227,33 @@ def write_invalid_records(invalid_records, run_date=None):
 
     print(f"Wrote {len(invalid_records)} invalid records to {filename}")
 
+# -- Process Worker --------------------------------------------
+# Pulls payloads off shared queue and processes them
+def process_worker():
+    while True:
+        payload = message_queue.get()
+
+        if payload is None:
+            message_queue.task_done()
+            break
+    
+        with stats_lock:
+            stats.record_breadcrumb(payload)
+
+        # Validate breadcrumb
+        valid, errors = validate_breadcrumb(payload)
+
+        if not valid:
+            record = {
+                "record": payload,
+                "violations": errors
+            }
+            invalid_records.append(record)
+
+        else:
+            valid_records.append(payload)
+        
+        message_queue.task_done()
 
 # -- Message Callback ------------------------------------------
 def callback(message):
@@ -222,13 +269,14 @@ def callback(message):
     if payload.get('sentinel'):
         handle_sentinel(payload)
         message.ack()
+
+        # Enqueue poison pills to shut down worker threads
+        for _ in range(NUM_THREADS):
+            message_queue.put(None)
+
         return
-
-    with stats_lock:
-        stats.record_breadcrumb(payload)
     
-    bc_list.append(payload)
-
+    message_queue.put(payload)
     message.ack()
 
 
@@ -241,7 +289,14 @@ def main():
   
     while True:
         sentinel_event.clear()
+        valid_records.clear()
+        invalid_records.clear()
+
+        executor = ThreadPoolExecutor(max_workers=NUM_THREADS)
         subscriber = SubscriberClient()
+
+        for _ in range(NUM_THREADS):
+            executor.submit(process_worker)
 
         with subscriber:
             streaming_pull = subscriber.subscribe(
@@ -258,22 +313,12 @@ def main():
                 streaming_pull.result()
             except Exception:
                 pass
+    
+        # Wait for all workers to finish processing
+        executor.shutdown(wait=True)
+        debug_print("Finished recieveing breadcrumbs. Validating data...\n")
 
         # Validation
-        debug_print("Finished recieveing breadcrumbs. Validating data...\n")
-        invalid_records = []
-        valid_records = []
-        for record in bc_list:
-            valid, errors = validate_breadcrumb(record)
-            if not valid:
-                invalid_record = {
-                    "record": record,
-                    "violations": errors
-                }
-                invalid_records.append(invalid_record)
-            else:
-                valid_records.append(record)
-
         write_invalid_records(invalid_records)
 
         # TODO transformation
@@ -282,7 +327,7 @@ def main():
 
         with stats_lock:
             stats.reset()
-        bc_list.clear()
+
         debug_print("Finished processing. Stats reset.\n")
 
 
