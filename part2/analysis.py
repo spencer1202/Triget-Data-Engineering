@@ -126,6 +126,87 @@ def handle_sentinel(payload):
     sentinel_event.set()
 
 
+# Validate breadcrumbs
+def validate_breadcrumb(payload):
+    errors = []
+
+    required_fields = [
+        'EVENT_NO_TRIP',
+        'VEHICLE_ID',
+        'OPD_DATE',
+        'ACT_TIME',
+        'METERS',
+        'GPS_LATITUDE',
+        'GPS_LONGITUDE'
+    ]
+
+    for field in required_fields:
+        if field not in payload or payload[field] in [None, '']:
+            errors.append(f"Missing required field: {field}")
+
+    try:
+        lat = float(payload.get('GPS_LATITUDE'))
+        if lat < -90 or lat > 90:
+            errors.append("GPS_LATITUDE out of range")
+    except:
+        errors.append("GPS_LATITUDE is not numeric")
+
+    try:
+        lon = float(payload.get('GPS_LONGITUDE'))
+        if lon < -180 or lon > 180:
+            errors.append("GPS_LONGITUDE out of range")
+    except:
+        errors.append("GPS_LONGITUDE is not numeric")
+
+    try:
+        act_time = int(payload.get('ACT_TIME'))
+        if act_time < 0 or act_time > 90000:
+            errors.append("ACT_TIME out of range")
+    except:
+        errors.append("ACT_TIME is not numeric")
+
+    try:
+        meters = float(payload.get('METERS'))
+        if meters < 0:
+            errors.append("METERS cannot be negative")
+    except:
+        errors.append("METERS is not numeric")
+
+    try:
+        lat = float(payload.get('GPS_LATITUDE'))
+        lon = float(payload.get('GPS_LONGITUDE'))
+
+        if not (45.0 <= lat <= 46.0 and -123.5 <= lon <= -122.0):
+            errors.append("GPS coordinates outside Portland metro area")
+    except:
+        pass
+
+    return len(errors) == 0, errors
+
+
+# Write invalid records to json file
+def write_invalid_records(invalid_records, run_date=None):
+    """
+    Write invalid breadcrumb records to a dated JSON file.
+
+    Parameters
+    ----------
+    invalid_records : list of dict
+        Each dict should have a 'record' key (the original data)
+        and a 'violations' key (list of assertion violation messages).
+    run_date : str, optional
+        Date string in YYYY-MM-DD format. Defaults to today.
+    """
+    if run_date is None:
+        run_date = dt.date.today().isoformat()
+
+    filename = f"invalid_data_{run_date}.json"
+
+    with open(filename, "w") as f:
+        json.dump(invalid_records, f, indent=2, default=str)
+
+    print(f"Wrote {len(invalid_records)} invalid records to {filename}")
+
 
 # -- Message Callback ------------------------------------------
 def callback(message):
@@ -178,9 +259,25 @@ def main():
             except Exception:
                 pass
 
-        debug_print("Finished recieveing breadcrumbs. Validating and transforming data...\n")
-        # TODO transformation & validation
-        df = pd.DataFrame(bc_list)
+        # Validation
+        debug_print("Finished recieveing breadcrumbs. Validating data...\n")
+        invalid_records = []
+        valid_records = []
+        for record in bc_list:
+            valid, errors = validate_breadcrumb(record)
+            if not valid:
+                invalid_record = {
+                    "record": record,
+                    "violations": errors
+                }
+                invalid_records.append(invalid_record)
+            else:
+                valid_records.append(record)
+
+        write_invalid_records(invalid_records)
+
+        # TODO transformation
+        df = pd.DataFrame(valid_records)
         print(df)
 
         with stats_lock:
