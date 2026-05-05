@@ -1,4 +1,3 @@
-import sys
 import queue
 import pandas as pd
 import time
@@ -6,7 +5,7 @@ import datetime as dt
 import json
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
-from threading import Event, Lock
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -102,8 +101,8 @@ class Statistics:
 
 # -- Globals ---------------------------------------------------
 stats           = Statistics()
-sentinel_event  = Event()
 stats_lock      = Lock()
+sentinel_queue  = queue.Queue(maxsize=1)
 
 # Output lists
 valid_records           = []
@@ -116,8 +115,7 @@ message_queue = queue.Queue(maxsize=MESSAGE_QUEUE_MAX)
 # Print only if DEBUG_PRINT option is true
 def debug_print(val):
     if DEBUG_PRINT:
-        #print(val)
-        pass
+        print(val)
 
 
 # Handle sentinel message
@@ -127,23 +125,28 @@ def handle_sentinel(payload):
     # Wait until remaining messages are processed
     expected_count = payload.get('count')
     timeout = 30
+
     while timeout > 0:
         # Queue has been fully processed
-        if message_queue.empty():
-            with stats_lock:
-                current = stats.total_breadcrumbs
-            # Expected number of messages have been processed, proceed
-            if current >= expected_count:
-                break
+        with stats_lock:
+            current = stats.total_breadcrumbs
+        # Expected number of messages have been processed, proceed
+        if current >= expected_count and message_queue.empty():
+            break
         timeout -= 1
         time.sleep(1)
+
+    # Enqueue poison pills to shut down worker threads
+    for _ in range(NUM_THREADS):
+        message_queue.put(None)
+    
+    message_queue.join()
 
     # Report stats
     with stats_lock:
         stats.end_stats()
         stats.report()
 
-    sentinel_event.set()
 
 
 # Validate breadcrumbs
@@ -267,12 +270,8 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
-        handle_sentinel(payload)
+        sentinel_queue.put(payload)
         message.ack()
-
-        # Enqueue poison pills to shut down worker threads
-        for _ in range(NUM_THREADS):
-            message_queue.put(None)
 
         return
     
@@ -288,16 +287,14 @@ def main():
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
   
     while True:
-        sentinel_event.clear()
         valid_records.clear()
         invalid_records.clear()
 
         executor = ThreadPoolExecutor(max_workers=NUM_THREADS)
-        subscriber = SubscriberClient()
-
         for _ in range(NUM_THREADS):
             executor.submit(process_worker)
 
+        subscriber = SubscriberClient()
         with subscriber:
             streaming_pull = subscriber.subscribe(
                     sub_path, 
@@ -307,15 +304,17 @@ def main():
             debug_print("Waiting for breadcrumbs...")
 
             # Block to wait for sentinel event
-            sentinel_event.wait()
-            streaming_pull.cancel()
-            try:
-                streaming_pull.result()
-            except Exception:
-                pass
+            sentinel_payload = sentinel_queue.get()
+            handle_sentinel(sentinel_payload)
     
+        streaming_pull.cancel()
+        try:
+            streaming_pull.result()
+        except Exception:
+            pass
+
         # Wait for all workers to finish processing
-        executor.shutdown(wait=True)
+        executor.shutdown(wait=False)
         debug_print("Finished recieveing breadcrumbs. Validating data...\n")
 
         # Validation
