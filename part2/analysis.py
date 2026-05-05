@@ -14,7 +14,7 @@ PROJECT_ID      = 'triget-data-engineering'
 SUBSCRIPTION_ID = 'test_sub'
 
 # Debug settings
-DEBUG_PRINT = False
+DEBUG_PRINT = True
 
 # Number of worker threads processing message queue
 NUM_THREADS = 4
@@ -148,7 +148,7 @@ def handle_sentinel(payload):
         stats.report()
 
 
-
+# -- Validation ------------------------------------------------
 # Validate breadcrumbs
 def validate_breadcrumb(payload):
     errors = []
@@ -229,6 +229,35 @@ def write_invalid_records(invalid_records, run_date=None):
         json.dump(invalid_records, f, indent=2, default=str)
 
     print(f"Wrote {len(invalid_records)} invalid records to {filename}")
+
+
+# -- Transformation --------------------------------------------
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    opd_date = pd.to_datetime(df["OPD_DATE"], format="%d%b%Y:%H:%M:%S")
+    act_time = pd.to_timedelta(df["ACT_TIME"], unit="s")
+    df["TIMESTAMP"] = opd_date + act_time
+
+    df = df.sort_values(by=["EVENT_NO_TRIP", "TIMESTAMP"])
+
+    delta_meters = df.groupby("EVENT_NO_TRIP")["METERS"].diff()
+    delta_time = df.groupby("EVENT_NO_TRIP")["TIMESTAMP"].diff().dt.total_seconds()
+
+    df["SPEED"] = delta_meters / delta_time
+    df = df.sort_index()
+
+    # Remove unneeded fields
+    df = df.drop(columns=['EVENT_NO_STOP', 'GPS_SATELLITES', 'GPS_HDOP', 'OPD_DATE', 'ACT_TIME'])
+
+    col_names = {
+        "EVENT_NO_TRIP" : "trip_id",
+        "VEHICLE_ID"    : "vehicle_id",
+        "GPS_LONGITUDE" : "longitude",
+        "GPS_LATITUDE"  : "latitude"
+    }
+    df = df.rename(columns=col_names)
+
+    return df
+
 
 # -- Process Worker --------------------------------------------
 # Pulls payloads off shared queue and processes them
@@ -320,9 +349,11 @@ def main():
         # Validation
         write_invalid_records(invalid_records)
 
-        # TODO transformation
+        # Transformation
         df = pd.DataFrame(valid_records)
-        print(df)
+        df = transform(df)
+
+        debug_print(df)
 
         with stats_lock:
             stats.reset()
