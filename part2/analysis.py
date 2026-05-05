@@ -14,7 +14,7 @@ PROJECT_ID      = 'triget-data-engineering'
 SUBSCRIPTION_ID = 'test_sub'
 
 # Debug settings
-DEBUG_PRINT = True
+DEBUG_PRINT = False
 
 # Number of worker threads processing message queue
 NUM_THREADS = 4
