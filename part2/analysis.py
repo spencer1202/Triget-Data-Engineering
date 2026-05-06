@@ -358,6 +358,7 @@ def main():
         df = transform(df)
 
         debug_print(df)
+        # TODO insert into database
 
         with stats_lock:
             stats.reset()
