@@ -45,6 +45,7 @@ class Statistics:
         self.total_time                   = None  # Elapsed wall-clock time from moment when first breadcrumb of the 
                                                   # day is received until moment when the sentinel message is received.
         self.throughput                   = None  # Analysis Throughput (breadcrumbs per second)
+        self.invalid_records              = 0     # Number of invalid records received
 
 
     # Update running stats with one breadcrumb
@@ -76,11 +77,12 @@ class Statistics:
 
       
     # Calculate end-of-run stats
-    def end_stats(self):
+    def end_stats(self, invalid_record_count):
         self.sentinel_received_timestamp = time.ctime()
         if self.first_breadcrumb_wall_time:
             self.total_time = time.time() - self.first_breadcrumb_wall_time
             self.throughput = (self.total_breadcrumbs / self.total_time) if self.total_time > 0 else 0
+        self.invalid_records = invalid_record_count
 
 
     def report(self):
@@ -94,6 +96,7 @@ class Statistics:
         print(f"Breadcrumbs received:           {self.total_breadcrumbs}")
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
+        print(f"Invalid record count:           {self.invalid_records}")
         print(f"------------------------\n")
 
 
@@ -144,7 +147,7 @@ def handle_sentinel(payload):
 
     # Report stats
     with stats_lock:
-        stats.end_stats()
+        stats.end_stats(len(invalid_records))
         stats.report()
 
 
@@ -228,7 +231,7 @@ def write_invalid_records(invalid_records, run_date=None):
     with open(filename, "w") as f:
         json.dump(invalid_records, f, indent=2, default=str)
 
-    print(f"Wrote {len(invalid_records)} invalid records to {filename}")
+    debug_print(f"Wrote {len(invalid_records)} invalid records to {filename}")
 
 
 # -- Transformation --------------------------------------------
