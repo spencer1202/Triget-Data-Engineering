@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # -- Configuration ---------------------------------------------
 PROJECT_ID      = 'triget-data-engineering' 
-SUBSCRIPTION_ID = 'test_sub'
+SUBSCRIPTION_ID = 'analysis_sub'
 
 # Debug settings
 DEBUG_PRINT = False
