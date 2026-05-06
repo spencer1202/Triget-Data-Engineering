@@ -12,5 +12,5 @@ reset_all: reset_analysis reset_backup
 reset_analysis:
 	gcloud pubsub subscriptions seek analysis_sub --time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-reset_backup
+reset_backup:
 	gcloud pubsub subscriptions seek backup_sub --time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
