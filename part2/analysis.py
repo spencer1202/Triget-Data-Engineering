@@ -339,9 +339,10 @@ def main():
             sentinel_payload = sentinel_queue.get()
             handle_sentinel(sentinel_payload)
     
-        streaming_pull.cancel()
         try:
             streaming_pull.result()
+            streaming_pull.cancel()
+
         except Exception:
             pass
 
