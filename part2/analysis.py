@@ -3,11 +3,19 @@ import pandas as pd
 import time
 import datetime as dt
 import json
+import psycopg2
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
+from psycopg2.extras import execute_values
 
+DB_HOST = "localhost"
+DB_PORT = 5432
+DB_NAME = "trimetdb"
+DB_USER = "trimetuser"
+DB_PASSWORD = "trimetpassword"
+TABLE_NAME = "breadcrumb"
 
 # -- Configuration ---------------------------------------------
 PROJECT_ID      = 'triget-data-engineering' 
@@ -310,6 +318,69 @@ def callback(message):
     message_queue.put(payload)
     message.ack()
 
+# -- Database helper functions -----------------------------------
+def get_connection():
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+
+
+def create_breadcrumb_table():
+    sql = """
+        CREATE TABLE IF NOT EXISTS breadcrumb (
+            id SERIAL PRIMARY KEY,
+            trip_id BIGINT,
+            vehicle_id INTEGER,
+            timestamp TIMESTAMP,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            meters DOUBLE PRECISION,
+            speed DOUBLE PRECISION
+        );
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+    finally:
+        conn.close()
+
+
+def store_breadcrumbs(df):
+    if df.empty:
+        return 0
+
+    records = list(df[[
+        "trip_id",
+        "vehicle_id",
+        "TIMESTAMP",
+        "latitude",
+        "longitude",
+        "METERS",
+        "SPEED"
+    ]].itertuples(index=False, name=None))
+
+    sql = """
+        INSERT INTO breadcrumb
+        (trip_id, vehicle_id, timestamp, latitude, longitude, meters, speed)
+        VALUES %s
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                execute_values(cur, sql, records)
+    finally:
+        conn.close()
+
+    return len(records)
 
 # -- Main ------------------------------------------------------
 def main():
@@ -358,7 +429,10 @@ def main():
         df = transform(df)
 
         debug_print(df)
-        # TODO insert into database
+        
+        create_breadcrumb_table()
+        inserted_count = store_breadcrumbs(df)
+        print(f"Inserted {inserted_count} valid breadcrumb records into PostgreSQL.")
 
         with stats_lock:
             stats.reset()
