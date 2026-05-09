@@ -3,6 +3,7 @@ import time
 import requests
 import json
 import pandas as pd
+import argparse
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1 import PublisherClient
 from google.cloud.pubsub_v1.types import (
@@ -70,7 +71,7 @@ def debug_print(val):
         #print(val)
 
 # Make API request to get JSON response for one vehicle
-def get_breadcrumbs(vehicle_id) -> dict | None:
+def get_breadcrumbs(vehicle_id) -> list[dict] | None:
     global stats
     if stats.api_call_begin is None:
         stats.api_call_begin = time.ctime()
@@ -131,6 +132,17 @@ def publish_sentinel(publisher: PublisherClient, topic_path):
         debug_print(f"Failed to send sentinel message: {ex}")
 
 
+# -- Get Backups -----------------------------------------------
+def get_backups(filepath: str) -> list[dict] | None:
+    breadcrumbs = []
+    try:
+        with open(filepath, "r") as file:
+            for line in file:
+                breadcrumbs.append(json.loads(line))
+    except:
+        return None
+
+    return breadcrumbs
 
 # -- Main ------------------------------------------------------
 def main():
@@ -138,6 +150,10 @@ def main():
     stats.start               = time.time()   # get start time
     stats.data_received_ct    = 0             # amount of vehicle IDs with data received
     stats.received_ct         = 0             # number of breadcrumbs received from API
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-b", "--backup")
+    args = parser.parse_args()
 
     # Get vehicle IDs
     vehicle_ids = pd.read_csv(IDS_FILE, header=None)[0].tolist()
@@ -152,15 +168,23 @@ def main():
     )
     topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
-    # Get breadcrumb data for each vehicle ID
-    for id in vehicle_ids:
-        breadcrumbs: dict = get_breadcrumbs(id)
+    if args.backup: 
+        debug_print(f"Using backup file: {args.backup}")
+        breadcrumbs: list = get_backups(args.backup)
+        if not breadcrumbs:
+            debug_print("Failed to load backup file.")
+            return
+        publish_breadcrumbs(breadcrumbs, publisher, topic_path)
+    else:
+        # Get breadcrumb data for each vehicle ID
+        for id in vehicle_ids:
+            breadcrumbs: list = get_breadcrumbs(id)
 
-        if breadcrumbs:
-            # Publish breadcrumbs
-            stats.data_received_ct += 1
-            stats.received_ct += len(breadcrumbs)
-            publish_breadcrumbs(breadcrumbs, publisher, topic_path)
+            if breadcrumbs:
+                # Publish breadcrumbs
+                stats.data_received_ct += 1
+                stats.received_ct += len(breadcrumbs)
+                publish_breadcrumbs(breadcrumbs, publisher, topic_path)
 
     debug_print("Finished publishing. Waiting to send sentinel...")
     time.sleep(10)
