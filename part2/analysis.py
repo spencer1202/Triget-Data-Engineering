@@ -4,17 +4,21 @@ import time
 import datetime as dt
 import json
 import psycopg2
+import dotenv
+import os
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import execute_values
 
+dotenv.load_dotenv()
+
 DB_HOST = "localhost"
 DB_PORT = 5432
-DB_NAME = "trimetdb"
-DB_USER = "trimetuser"
-DB_PASSWORD = "trimetpassword"
+DB_NAME = "breadcrumbs"
+DB_USER = "admin"
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 TABLE_NAME = "breadcrumb"
 
 # -- Configuration ---------------------------------------------
@@ -54,6 +58,7 @@ class Statistics:
                                                   # day is received until moment when the sentinel message is received.
         self.throughput                   = None  # Analysis Throughput (breadcrumbs per second)
         self.invalid_records              = 0     # Number of invalid records received
+        self.breadcrumbs_stored           = 0     # Number of breadcrumbs stored
 
 
     # Update running stats with one breadcrumb
@@ -105,6 +110,7 @@ class Statistics:
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
         print(f"Invalid record count:           {self.invalid_records}")
+        print(f"Inserted into database:         {self.breadcrumbs_stored}")
         print(f"------------------------\n")
 
 
@@ -153,10 +159,7 @@ def handle_sentinel(payload):
     
     message_queue.join()
 
-    # Report stats
-    with stats_lock:
-        stats.end_stats(len(invalid_records))
-        stats.report()
+
 
 
 # -- Validation ------------------------------------------------
@@ -329,27 +332,26 @@ def get_connection():
     )
 
 
-def create_breadcrumb_table():
-    sql = """
-        CREATE TABLE IF NOT EXISTS breadcrumb (
-            id SERIAL PRIMARY KEY,
-            trip_id BIGINT,
-            vehicle_id INTEGER,
-            timestamp TIMESTAMP,
-            latitude DOUBLE PRECISION,
-            longitude DOUBLE PRECISION,
-            meters DOUBLE PRECISION,
-            speed DOUBLE PRECISION
-        );
-    """
+# def create_breadcrumb_table():
+#     sql = """
+#         CREATE TABLE IF NOT EXISTS breadcrumb (
+#             trip_id     INTEGER       NOT NULL,
+#             vehicle_id  INTEGER       NOT NULL,
+#             timestamp   TIMESTAMP     NOT NULL,
+#             latitude    DOUBLE PRECISION NOT NULL,
+#             longitude   DOUBLE PRECISION NOT NULL,
+#             speed       DOUBLE PRECISION,
+#             meters      INTEGER
+#         );
+#     """
 
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-    finally:
-        conn.close()
+#     conn = get_connection()
+#     try:
+#         with conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(sql)
+#     finally:
+#         conn.close()
 
 
 def store_breadcrumbs(df):
@@ -430,11 +432,15 @@ def main():
 
         debug_print(df)
         
-        create_breadcrumb_table()
+        #create_breadcrumb_table()      # breadcrumb table should exist already
         inserted_count = store_breadcrumbs(df)
-        print(f"Inserted {inserted_count} valid breadcrumb records into PostgreSQL.")
+        debug_print(f"Inserted {inserted_count} valid breadcrumb records into PostgreSQL.")
 
+            # Report stats
         with stats_lock:
+            stats.breadcrumbs_stored = inserted_count
+            stats.end_stats(len(invalid_records))
+            stats.report()
             stats.reset()
 
         debug_print("Finished processing. Stats reset.\n")
