@@ -258,6 +258,7 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 
     df["SPEED"] = delta_meters / delta_time
     df = df.sort_index()
+    df["SPEED"] = df["SPEED"].where(df["SPEED"].notna(), None) # convert to NULL for databse
 
     # Remove unneeded fields
     df = df.drop(columns=['EVENT_NO_STOP', 'GPS_SATELLITES', 'GPS_HDOP', 'OPD_DATE', 'ACT_TIME'])
