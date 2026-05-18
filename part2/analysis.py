@@ -1,11 +1,25 @@
-import sys
+import queue
+import pandas as pd
 import time
 import datetime as dt
 import json
+import psycopg2
+import dotenv
+import os
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
-from threading import Event, Lock
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
+from psycopg2.extras import execute_values
 
+dotenv.load_dotenv()
+
+DB_HOST = "localhost"
+DB_PORT = 5432
+DB_NAME = "breadcrumbs"
+DB_USER = "admin"
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+TABLE_NAME = "breadcrumb"
 
 # -- Configuration ---------------------------------------------
 PROJECT_ID      = 'triget-data-engineering' 
@@ -13,6 +27,12 @@ SUBSCRIPTION_ID = 'analysis_sub'
 
 # Debug settings
 DEBUG_PRINT = False
+
+# Number of worker threads processing message queue
+NUM_THREADS = 4
+
+# Maximum messages in internal message queue
+MESSAGE_QUEUE_MAX = 0
 
 # FLow control settings
 flow_control = FlowControl(
@@ -38,6 +58,8 @@ class Statistics:
         self.total_time                   = None  # Elapsed wall-clock time from moment when first breadcrumb of the 
                                                   # day is received until moment when the sentinel message is received.
         self.throughput                   = None  # Analysis Throughput (breadcrumbs per second)
+        self.invalid_records              = 0     # Number of invalid records received
+        self.breadcrumbs_stored           = 0     # Number of breadcrumbs stored
 
 
     # Update running stats with one breadcrumb
@@ -69,11 +91,12 @@ class Statistics:
 
       
     # Calculate end-of-run stats
-    def end_stats(self):
+    def end_stats(self, invalid_record_count):
         self.sentinel_received_timestamp = time.ctime()
         if self.first_breadcrumb_wall_time:
             self.total_time = time.time() - self.first_breadcrumb_wall_time
             self.throughput = (self.total_breadcrumbs / self.total_time) if self.total_time > 0 else 0
+        self.invalid_records = invalid_record_count
 
 
     def report(self):
@@ -88,23 +111,59 @@ class Statistics:
         print(f"Invalid breadcrumbs dropped:    {self.invalid_breadcrumbs}")
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
+        print(f"Invalid record count:           {self.invalid_records}")
+        print(f"Inserted into database:         {self.breadcrumbs_stored}")
         print(f"------------------------\n")
 
 
 # -- Globals ---------------------------------------------------
 stats           = Statistics()
-sentinel_event  = Event()
 stats_lock      = Lock()
+sentinel_queue  = queue.Queue(maxsize=1)
 
+# Output lists
+valid_records           = []
+invalid_records         = []
+
+# Internal work queue: callback enqueues raw payloads; workers dequeue and process
+message_queue = queue.Queue(maxsize=MESSAGE_QUEUE_MAX)
 
 # -- Helper Functions ------------------------------------------
 # Print only if DEBUG_PRINT option is true
 def debug_print(val):
     if DEBUG_PRINT:
-        #print(val)
-        pass
+        print(val)
 
 
+# Handle sentinel message
+def handle_sentinel(payload):
+    debug_print("Sentinel received!")
+
+    # Wait until remaining messages are processed
+    expected_count = payload.get('count')
+    timeout = 30
+
+    while timeout > 0:
+        # Queue has been fully processed
+        with stats_lock:
+            current = stats.total_breadcrumbs
+        # Expected number of messages have been processed, proceed
+        if current >= expected_count and message_queue.empty():
+            break
+        timeout -= 1
+        time.sleep(1)
+
+    # Enqueue poison pills to shut down worker threads
+    for _ in range(NUM_THREADS):
+        message_queue.put(None)
+    
+    message_queue.join()
+
+
+
+
+# -- Validation ------------------------------------------------
+# Validate breadcrumbs
 def validate_breadcrumb(payload):
     errors = []
 
@@ -162,76 +221,86 @@ def validate_breadcrumb(payload):
     return len(errors) == 0, errors
 
 
-# -- Transform -------------------------------------------------
-previous_trip_points = {}
-invalid_records = []
+# Write invalid records to json file
+def write_invalid_records(invalid_records, run_date=None):
+    """
+    Write invalid breadcrumb records to a dated JSON file.
 
+    Parameters
+    ----------
+    invalid_records : list of dict
+        Each dict should have a 'record' key (the original data)
+        and a 'violations' key (list of assertion violation messages).
+    run_date : str, optional
+        Date string in YYYY-MM-DD format. Defaults to today.
+    """
+    if run_date is None:
+        run_date = dt.date.today().isoformat()
 
-def transform_breadcrumb(payload):
-    transformed = payload.copy()
+    filename = f"invalid_data_{run_date}.json"
 
-    # Create timestamp from OPD_DATE + ACT_TIME
-    opd_date = transformed.get('OPD_DATE', '')
-    act_time = int(transformed.get('ACT_TIME', 0))
-    base = dt.datetime.strptime(opd_date[:9], '%d%b%Y')
-    timestamp = base + dt.timedelta(seconds=act_time)
-
-    transformed['timestamp'] = timestamp.isoformat()
-
-    # Compute speed per trip
-    trip_id = transformed.get('EVENT_NO_TRIP')
-    meters = float(transformed.get('METERS', 0))
-
-    if trip_id in previous_trip_points:
-        previous_timestamp, previous_meters = previous_trip_points[trip_id]
-
-        time_diff = (timestamp - previous_timestamp).total_seconds()
-        meters_diff = meters - previous_meters
-
-        if time_diff > 0 and meters_diff >= 0:
-            speed = meters_diff / time_diff
-        else:
-            speed = 0.0
-    else:
-        speed = 0.0
-
-    transformed['speed'] = speed
-    previous_trip_points[trip_id] = (timestamp, meters)
-
-    # Remove unneeded fields
-    for field in ['EVENT_NO_STOP', 'GPS_SATELLITES', 'GPS_HDOP', 'OPD_DATE', 'ACT_TIME']:
-        transformed.pop(field, None)
-
-    # Rename fields
-    transformed['trip_id'] = transformed.pop('EVENT_NO_TRIP')
-    transformed['vehicle_id'] = transformed.pop('VEHICLE_ID')
-    transformed['longitude'] = transformed.pop('GPS_LONGITUDE')
-    transformed['latitude'] = transformed.pop('GPS_LATITUDE')
-
-    return transformed
-
-
-# Handle sentinel message
-def handle_sentinel(payload):
-    debug_print("Sentinel received!")
-
-    # Wait until remaining messages are processed
-    expected_count = payload.get('count', 0)
-    timeout = 10
-    while (stats.total_breadcrumbs + stats.invalid_breadcrumbs) < expected_count and timeout > 0:
-        timeout -= 1
-        time.sleep(1)
-
-    # Report stats
-    with stats_lock:
-        stats.end_stats()
-        stats.report()
-
-    with open(f"invalid_data_{dt.date.today().isoformat()}.json", "w") as f:
+    with open(filename, "w") as f:
         json.dump(invalid_records, f, indent=2, default=str)
 
-    sentinel_event.set()
+    debug_print(f"Wrote {len(invalid_records)} invalid records to {filename}")
 
+
+# -- Transformation --------------------------------------------
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    opd_date = pd.to_datetime(df["OPD_DATE"], format="%d%b%Y:%H:%M:%S")
+    act_time = pd.to_timedelta(df["ACT_TIME"], unit="s")
+    df["TIMESTAMP"] = opd_date + act_time
+
+    df = df.sort_values(by=["EVENT_NO_TRIP", "TIMESTAMP"])
+
+    delta_meters = df.groupby("EVENT_NO_TRIP")["METERS"].diff()
+    delta_time = df.groupby("EVENT_NO_TRIP")["TIMESTAMP"].diff().dt.total_seconds()
+
+    df["SPEED"] = delta_meters / delta_time
+    df = df.sort_index()
+    df["SPEED"] = df["SPEED"].where(df["SPEED"].notna(), None) # convert to NULL for databse
+
+    # Remove unneeded fields
+    df = df.drop(columns=['EVENT_NO_STOP', 'GPS_SATELLITES', 'GPS_HDOP', 'OPD_DATE', 'ACT_TIME'])
+
+    col_names = {
+        "EVENT_NO_TRIP" : "trip_id",
+        "VEHICLE_ID"    : "vehicle_id",
+        "GPS_LONGITUDE" : "longitude",
+        "GPS_LATITUDE"  : "latitude"
+    }
+    df = df.rename(columns=col_names)
+
+    return df
+
+
+# -- Process Worker --------------------------------------------
+# Pulls payloads off shared queue and processes them
+def process_worker():
+    while True:
+        payload = message_queue.get()
+
+        if payload is None:
+            message_queue.task_done()
+            break
+    
+        with stats_lock:
+            stats.record_breadcrumb(payload)
+
+        # Validate breadcrumb
+        valid, errors = validate_breadcrumb(payload)
+
+        if not valid:
+            record = {
+                "record": payload,
+                "violations": errors
+            }
+            invalid_records.append(record)
+
+        else:
+            valid_records.append(payload)
+        
+        message_queue.task_done()
 
 # -- Message Callback ------------------------------------------
 def callback(message):
@@ -245,33 +314,76 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
-        handle_sentinel(payload)
+        sentinel_queue.put(payload)
         message.ack()
+
         return
-
-    is_valid, errors = validate_breadcrumb(payload)
-
-    if not is_valid:
-        print(f"Invalid breadcrumb dropped: {errors}")
-        invalid_records.append({
-            "record": payload,
-            "violations": errors
-        })
-        with stats_lock:
-            stats.invalid_breadcrumbs += 1
-        message.ack()
-        return
-
-    transformed_payload = transform_breadcrumb(payload)
-
-    with stats_lock:
-        stats.record_breadcrumb(payload)
-
-    # Later, Step 7 database insert will use transformed_payload
-    # insert_breadcrumb(transformed_payload)
-
+    
+    message_queue.put(payload)
     message.ack()
 
+# -- Database helper functions -----------------------------------
+def get_connection():
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+
+
+# def create_breadcrumb_table():
+#     sql = """
+#         CREATE TABLE IF NOT EXISTS breadcrumb (
+#             trip_id     INTEGER       NOT NULL,
+#             vehicle_id  INTEGER       NOT NULL,
+#             timestamp   TIMESTAMP     NOT NULL,
+#             latitude    DOUBLE PRECISION NOT NULL,
+#             longitude   DOUBLE PRECISION NOT NULL,
+#             speed       DOUBLE PRECISION,
+#             meters      INTEGER
+#         );
+#     """
+
+#     conn = get_connection()
+#     try:
+#         with conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(sql)
+#     finally:
+#         conn.close()
+
+
+def store_breadcrumbs(df):
+    if df.empty:
+        return 0
+
+    records = list(df[[
+        "trip_id",
+        "vehicle_id",
+        "TIMESTAMP",
+        "latitude",
+        "longitude",
+        "METERS",
+        "SPEED"
+    ]].itertuples(index=False, name=None))
+
+    sql = """
+        INSERT INTO breadcrumb
+        (trip_id, vehicle_id, timestamp, latitude, longitude, meters, speed)
+        VALUES %s
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                execute_values(cur, sql, records)
+    finally:
+        conn.close()
+
+    return len(records)
 
 # -- Main ------------------------------------------------------
 def main():
@@ -281,9 +393,14 @@ def main():
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
   
     while True:
-        sentinel_event.clear()
-        subscriber = SubscriberClient()
+        valid_records.clear()
+        invalid_records.clear()
 
+        executor = ThreadPoolExecutor(max_workers=NUM_THREADS)
+        for _ in range(NUM_THREADS):
+            executor.submit(process_worker)
+
+        subscriber = SubscriberClient()
         with subscriber:
             streaming_pull = subscriber.subscribe(
                     sub_path, 
@@ -293,16 +410,40 @@ def main():
             debug_print("Waiting for breadcrumbs...")
 
             # Block to wait for sentinel event
-            sentinel_event.wait()
+            sentinel_payload = sentinel_queue.get()
+            handle_sentinel(sentinel_payload)
+    
+        try:
+            streaming_pull.result()
             streaming_pull.cancel()
-            try:
-                streaming_pull.result()
-            except Exception:
-                pass
 
+        except Exception:
+            pass
+
+        # Wait for all workers to finish processing
+        executor.shutdown(wait=False)
+        debug_print("Finished recieveing breadcrumbs. Validating data...\n")
+
+        # Validation
+        write_invalid_records(invalid_records)
+
+        # Transformation
+        df = pd.DataFrame(valid_records)
+        df = transform(df)
+
+        debug_print(df)
+        
+        #create_breadcrumb_table()      # breadcrumb table should exist already
+        inserted_count = store_breadcrumbs(df)
+        debug_print(f"Inserted {inserted_count} valid breadcrumb records into PostgreSQL.")
+
+            # Report stats
         with stats_lock:
+            stats.breadcrumbs_stored = inserted_count
+            stats.end_stats(len(invalid_records))
+            stats.report()
             stats.reset()
-            previous_trip_points.clear()
+
         debug_print("Finished processing. Stats reset.\n")
 
 
