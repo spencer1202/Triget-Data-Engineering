@@ -53,6 +53,7 @@ class Statistics:
         self.earliest_time                = None  # Earliest breadcrumb timestamp (derived from OPD_DATE and ACT_TIME)
         self.latest_time                  = None  # Latest breadcrumb timestamp (derived from OPD_DATE and ACT_TIME)
         self.total_breadcrumbs            = 0     # Total number of breadcrumbs received
+        self.invalid_breadcrumbs          = 0     # Total number of invalid breadcrumbs dropped
         self.sentinel_received_timestamp  = None  # Timestamp of moment when sentinel is received
         self.total_time                   = None  # Elapsed wall-clock time from moment when first breadcrumb of the 
                                                   # day is received until moment when the sentinel message is received.
@@ -107,13 +108,12 @@ class Statistics:
         print(f"Unique vehicle IDs:             {len(self.vehicle_ids)}")
         print(f"Unique trips:                   {len(self.trip_ids)}")
         print(f"Breadcrumbs received:           {self.total_breadcrumbs}")
+        print(f"Invalid breadcrumbs dropped:    {self.invalid_breadcrumbs}")
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
         print(f"Invalid record count:           {self.invalid_records}")
         print(f"Inserted into database:         {self.breadcrumbs_stored}")
         print(f"------------------------\n")
-
-
 
 
 # -- Globals ---------------------------------------------------
