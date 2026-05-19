@@ -4,7 +4,9 @@ import json
 import gzip
 import os
 import shutil
+import queue
 from threading import Event, Lock
+from concurrent.futures import ThreadPoolExecutor
 from google.cloud.pubsub_v1 import SubscriberClient
 from google.cloud.pubsub_v1.types import FlowControl
 
@@ -12,6 +14,8 @@ from google.cloud.pubsub_v1.types import FlowControl
 # -- Configuration --------------------------------------------------------
 PROJECT_ID      = 'triget-data-engineering'
 SUBSCRIPTION_ID = 'se_backup_sub'
+MESSAGE_QUEUE_MAX = 0
+NUM_THREADS = 5
 
 # Debug settings
 DEBUG_PRINT = False
@@ -71,12 +75,13 @@ class Statistics:
 
 # -- Globals --------------------------------------------------------------
 stats           = Statistics()
-sentinel_event  = Event()
 stats_lock      = Lock()
+sentinel_queue  = queue.Queue(maxsize=1)
 file_lock       = Lock()
 backup_file     = None      # backup file object, opened when first record arrives
 backup_filename = None      # name of today's log file
 
+message_queue = queue.Queue(maxsize=MESSAGE_QUEUE_MAX)
 
 # -- Helper Functions -----------------------------------------------------
 def debug_print(val):
@@ -91,9 +96,20 @@ def handle_sentinel(payload):
     # Wait until remaining messages are processed
     expected_count = payload.get('count')
     timeout = 30
-    while stats.total_stop_events < expected_count and timeout > 0:
+
+    while timeout > 0:
+        with stats_lock:
+            current = stats.total_stop_events
+        if current >= expected_count and message_queue.empty():
+            break
         timeout -= 1
         time.sleep(1)
+
+    # Enqueue poison pills to shut down worker threads
+    for _ in range(NUM_THREADS):
+        message_queue.put(None)
+
+    message_queue.join()
 
     # Close and compress backup file
     with file_lock:
@@ -105,8 +121,6 @@ def handle_sentinel(payload):
     with stats_lock:
         stats.end_stats()
         stats.report()
-
-    sentinel_event.set()
 
 
 # Open today's backup file
@@ -133,6 +147,31 @@ def compress_backup_file():
     debug_print(f"Compressed backup to: {gz_filename}")
 
 
+# -- Process Worker --------------------------------------------
+# Pulls payloads off shared queue and processes them
+def process_worker():
+    while True:
+        payload = message_queue.get()
+        raw_bytes = json.dumps(payload)
+
+        if payload is None:
+            message_queue.task_done()
+            break
+        
+        # Write to backup file
+        with file_lock:
+            if backup_file is None:
+                open_backup_file()
+            line = raw_bytes + '\n'     # separate records with newline
+            backup_file.write(line)
+
+        with stats_lock:
+            stats.record_event(payload, len(line))
+
+        message_queue.task_done()
+        
+
+
 # -- Message Callback -----------------------------------------------------
 def callback(message):
     try:
@@ -150,16 +189,7 @@ def callback(message):
         message.ack()
         return
 
-    # Write to backup file
-    with file_lock:
-        if backup_file is None:
-            open_backup_file()
-        line = raw_bytes + '\n'     # separate records with newline
-        backup_file.write(line)
-
-    with stats_lock:
-        stats.record_event(payload, len(line))
-
+    message_queue.put(payload)
     message.ack()
 
 
@@ -171,9 +201,11 @@ def main():
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
 
     while True:
-        sentinel_event.clear()
+        executor = ThreadPoolExecutor(max_workers=NUM_THREADS)
+        for _ in range(NUM_THREADS):
+            executor.submit(process_worker)
+        
         subscriber = SubscriberClient()
-
         with subscriber:
             streaming_pull = subscriber.subscribe(
                     sub_path,
@@ -182,13 +214,19 @@ def main():
             )
             debug_print("Waiting for stop events...")
 
-            sentinel_event.wait()   # wait for sentinel to be received
-
+            # Block to wait for sentinel event
+            sentinel_payload = sentinel_queue.get()
+            handle_sentinel(sentinel_payload)
+            
+        try:
+            streaming_pull.result()
             streaming_pull.cancel()
-            try:
-                streaming_pull.result()
-            except Exception:
-                pass
+
+        except Exception:
+            pass
+    
+        # Wait for all workers to finish processing
+        executor.shutdown(wait=False)
 
         # Reset for next day
         with stats_lock:
