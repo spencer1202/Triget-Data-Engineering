@@ -2,6 +2,7 @@ import queue
 import pandas as pd
 import time
 import datetime as dt
+import numpy as np
 import json
 import psycopg2
 import dotenv
@@ -12,6 +13,7 @@ from google.cloud.pubsub_v1.types import FlowControl
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import execute_values
+from psycopg2.extensions import register_adapter, AsIs
 
 dotenv.load_dotenv()
 
@@ -43,6 +45,12 @@ flow_control = FlowControl(
 
 # Coordinate transformer: EPSG:2913 (Oregon State Plane North, feet) -> WGS 84
 _transformer = Transformer.from_crs("EPSG:2913", "EPSG:4326", always_xy=True)
+
+# Tell psycopg2 how to handle numpy integers
+def add_numpy_support():
+    register_adapter(np.int64, AsIs)
+    register_adapter(np.float64, AsIs)
+
 
 # -- Statistics ------------------------------------------------
 class Statistics:
@@ -393,6 +401,7 @@ def store_stop_events(df):
     """
 
     conn = get_connection()
+    add_numpy_support()
     try:
         with conn:
             with conn.cursor() as cur:
