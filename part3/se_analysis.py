@@ -398,6 +398,8 @@ def store_stop_events(df):
          maximum_speed, train_mileage, pattern_distance, location_distance,
          gps_latitude, gps_longitude, data_source, schedule_status)
         VALUES %s
+        ON CONFLICT (vehicle_number, trip_number, arrive_time)
+        DO NOTHING;
     """
 
     conn = get_connection()
