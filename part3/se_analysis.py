@@ -391,7 +391,7 @@ def store_stop_events(df):
     ]].itertuples(index=False, name=None))
 
     sql = """
-        INSERT INTO stop_event
+        INSERT INTO stopevent
         (vehicle_number, leave_time, train, route_number, direction,
          service_key, trip_number, stop_time, arrive_time, dwell,
          location_id, door, lift, ons, offs, estimated_load,
