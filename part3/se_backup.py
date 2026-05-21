@@ -231,7 +231,7 @@ def main():
         # Reset for next day
         with stats_lock:
             stats.reset()
-            backup_file = None
+            backup_file.close()
             backup_filename = None
         debug_print("Finished processing. Stats reset.\n")
 
