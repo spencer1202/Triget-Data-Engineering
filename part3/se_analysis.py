@@ -328,6 +328,8 @@ def process_worker():
         message_queue.task_done()
 
 
+sentinel_recieved = False
+
 # -- Message Callback ------------------------------------------
 def callback(message):
     try:
@@ -340,8 +342,10 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
-        sentinel_queue.put(payload)
         message.ack()
+        if not sentinel_seen:
+            sentinel_seen = True
+            sentinel_queue.put(payload)
         return
 
     message_queue.put(payload)
@@ -424,6 +428,7 @@ def main():
     subscriber = SubscriberClient()
 
     while True:
+        sentinel_seen = False
         valid_records.clear()
         invalid_records.clear()
 
