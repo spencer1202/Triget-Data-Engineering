@@ -330,6 +330,7 @@ def process_worker():
 
 # -- Message Callback ------------------------------------------
 def callback(message):
+    global stats
     try:
         payload = json.loads(message.data.decode('utf-8'))
 
@@ -340,8 +341,13 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
-        sentinel_queue.put(payload)
+        if stats.total_stop_events == 0:
+            debug_print("Received duplicate sentinel.")
+            message.ack()
+            return
+        
         message.ack()
+        sentinel_queue.put(payload)
         return
 
     message_queue.put(payload)
