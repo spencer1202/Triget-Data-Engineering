@@ -226,7 +226,7 @@ def main():
             pass
     
         # Wait for all workers to finish processing
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=True)
 
         # Reset for next day
         with stats_lock:
