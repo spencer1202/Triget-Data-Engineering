@@ -232,6 +232,7 @@ def main():
         with stats_lock:
             stats.reset()
             backup_file.close()
+            backup_file = None
             backup_filename = None
         debug_print("Finished processing. Stats reset.\n")
 
