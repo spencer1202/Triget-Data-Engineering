@@ -332,6 +332,7 @@ sentinel_recieved = False
 
 # -- Message Callback ------------------------------------------
 def callback(message):
+    global sentinel_seen
     try:
         payload = json.loads(message.data.decode('utf-8'))
 
@@ -422,6 +423,7 @@ def store_stop_events(df):
 # -- Main ------------------------------------------------------
 def main():
     global stats
+    global sentinel_seen
 
     sub_path = SubscriberClient().subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
