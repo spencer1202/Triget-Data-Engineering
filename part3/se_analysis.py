@@ -119,7 +119,6 @@ class Statistics:
         print(f"Unique vehicle IDs:             {len(self.vehicle_ids)}")
         print(f"Unique trips:                   {len(self.trip_ids)}")
         print(f"Stop events received:           {self.total_stop_events}")
-        print(f"Invalid stop events dropped:    {self.invalid_stop_events}")
         print(f"Total elapsed time:             {self.total_time:.3f}")
         print(f"Throughput:                     {self.throughput:.3f} msg/s")
         print(f"Invalid record count:           {self.invalid_records}")
