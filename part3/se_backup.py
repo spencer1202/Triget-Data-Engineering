@@ -185,6 +185,10 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
+        if stats.total_stop_events == 0:
+            debug_print("Received duplicate sentinel.")
+            message.ack()
+            return 
         handle_sentinel(payload)
         message.ack()
         return
