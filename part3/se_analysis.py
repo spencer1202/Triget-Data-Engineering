@@ -388,8 +388,7 @@ def store_stop_events(df):
         "GPS_latitude",
         "GPS_longitude",
         "data_source",
-        "schedule_status",
-        "service_date"
+        "schedule_status"
     ]].itertuples(index=False, name=None))
 
     sql = """
@@ -398,7 +397,7 @@ def store_stop_events(df):
          service_key, trip_number, stop_time, arrive_time, dwell,
          location_id, door, lift, ons, offs, estimated_load,
          maximum_speed, train_mileage, pattern_distance, location_distance,
-         gps_latitude, gps_longitude, data_source, schedule_status, service_date)
+         gps_latitude, gps_longitude, data_source, schedule_status)
         VALUES %s
         ON CONFLICT (vehicle_number, trip_number, arrive_time)
         DO NOTHING;
