@@ -22,7 +22,7 @@ DB_PORT = 5432
 DB_NAME = "breadcrumbs"
 DB_USER = "admin"
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-TABLE_NAME = "stop_event"
+TABLE_NAME = "stopevent"
 
 # -- Configuration ---------------------------------------------
 PROJECT_ID      = 'triget-data-engineering'
@@ -328,11 +328,8 @@ def process_worker():
         message_queue.task_done()
 
 
-sentinel_recieved = False
-
 # -- Message Callback ------------------------------------------
 def callback(message):
-    global sentinel_seen
     try:
         payload = json.loads(message.data.decode('utf-8'))
 
@@ -343,10 +340,8 @@ def callback(message):
 
     # Sentinel message received
     if payload.get('sentinel'):
+        sentinel_queue.put(payload)
         message.ack()
-        if not sentinel_seen:
-            sentinel_seen = True
-            sentinel_queue.put(payload)
         return
 
     message_queue.put(payload)
@@ -423,14 +418,11 @@ def store_stop_events(df):
 # -- Main ------------------------------------------------------
 def main():
     global stats
-    global sentinel_seen
 
     sub_path = SubscriberClient().subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
-    subscriber = SubscriberClient()
 
     while True:
-        sentinel_seen = False
         valid_records.clear()
         invalid_records.clear()
 
@@ -438,6 +430,7 @@ def main():
         for _ in range(NUM_THREADS):
             executor.submit(process_worker)
 
+        subscriber = SubscriberClient()
         with subscriber:
             streaming_pull = subscriber.subscribe(
                     sub_path,
@@ -450,7 +443,6 @@ def main():
             sentinel_payload = sentinel_queue.get()
             handle_sentinel(sentinel_payload)
 
-
         try:
             streaming_pull.result()
             streaming_pull.cancel()
@@ -459,7 +451,7 @@ def main():
             pass
 
         # Wait for all workers to finish processing
-        executor.shutdown(wait=True)
+        executor.shutdown(wait=False)
         debug_print("Finished receiving stop events. Validating data...\n")
 
         # Validation
