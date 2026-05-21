@@ -363,7 +363,7 @@ def store_stop_events(df):
     if df.empty:
         return 0
 
-    df["service_key"] = df["service_key"].str.strip().str.slice(0, 0)
+    df["service_key"] = df["service_key"].str.strip().str.slice(0, 1)
     records = list(df[[
         "vehicle_number",
         "leave_time",
@@ -451,7 +451,7 @@ def main():
             pass
 
         # Wait for all workers to finish processing
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=True)
         debug_print("Finished receiving stop events. Validating data...\n")
 
         # Validation
