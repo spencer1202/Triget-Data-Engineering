@@ -421,6 +421,14 @@ def main():
 
     sub_path = SubscriberClient().subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
     debug_print(f"Listening on: {SUBSCRIPTION_ID}")
+    subscriber = SubscriberClient()
+
+    with subscriber:
+            streaming_pull = subscriber.subscribe(
+                    sub_path,
+                    callback=callback,
+                    flow_control=flow_control,
+            )
 
     while True:
         valid_records.clear()
@@ -430,18 +438,11 @@ def main():
         for _ in range(NUM_THREADS):
             executor.submit(process_worker)
 
-        subscriber = SubscriberClient()
-        with subscriber:
-            streaming_pull = subscriber.subscribe(
-                    sub_path,
-                    callback=callback,
-                    flow_control=flow_control,
-            )
-            debug_print("Waiting for stop events...")
+        debug_print("Waiting for stop events...")
 
-            # Block to wait for sentinel event
-            sentinel_payload = sentinel_queue.get()
-            handle_sentinel(sentinel_payload)
+        # Block to wait for sentinel event
+        sentinel_payload = sentinel_queue.get()
+        handle_sentinel(sentinel_payload)
 
         try:
             streaming_pull.result()
