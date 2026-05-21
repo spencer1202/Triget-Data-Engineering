@@ -363,6 +363,7 @@ def store_stop_events(df):
     if df.empty:
         return 0
 
+    df["service_key"] = df["service_key"].str.strip().str.slice(0, 0)
     records = list(df[[
         "vehicle_number",
         "leave_time",
